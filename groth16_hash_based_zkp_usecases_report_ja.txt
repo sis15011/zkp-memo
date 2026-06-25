@@ -1,0 +1,612 @@
+Groth16 とハッシュベース方式のユースケース比較レポート
+============================================================
+
+作成日: 2026-06-25
+対象方式: Groth16, ZK-STARK, Ligero, Aurora, Virgo
+
+本レポートの前提
+----------------
+
+本レポートでは、事実として確認できる利用例と、方式特性から見た推論上の適性を分けて整理する。
+
+「事実」は、公式仕様、公式ドキュメント、論文、監査報告、または公開された実装・サービス説明で確認できるものを指す。
+「推論」は、証明サイズ、検証コスト、trusted setupの有無、ポスト量子性、回路表現、開発容易性などの技術特性から導かれる用途適性を指す。
+
+対象とするハッシュベース方式は、ZK-STARK, Ligero, Aurora, Virgoである。
+ただし、これらはすべて同じ意味での「ハッシュ関数だけの方式」ではない。
+ZK-STARKはAIR/FRI/実行トレース系、LigeroはMPC-in-the-Head/IPCP/Reed-Solomon符号系、AuroraはR1CS向けIOP系、Virgoは多項式委譲/GKR系の透明ZKPである。
+共通点は、Groth16のようなペアリングベースのtrusted setup型SNARKではなく、ハッシュ関数や軽量プリミティブ、PCP/IOP、符号理論、多項式検査を中心に構成され、trusted setupを避けやすい点にある。
+
+1. エグゼクティブサマリー
+-------------------------
+
+Groth16は、「証明を極限まで小さくし、検証を非常に軽くしたい」場面に強い。
+オンチェーン検証、固定回路の繰り返し証明、ユーザーがスマホやブラウザで証明を生成してチェーンやサーバに提示する用途と相性がよい。
+実際に、Zcash Sapling、Tornado Cash、Semaphore/World ID、Sui zkLoginなどで利用例が確認できる。
+一方で、trusted setup、回路変更時の再セットアップ、ペアリングベース仮定、ポスト量子性の弱さが主な制約である。
+
+ZK-STARKは、「大きな計算をまとめて証明したい」「trusted setupを避けたい」「長期的な安全性・透明性を重視したい」用途に強い。
+実際に、StarkEx、Starknet、RISC Zero、Miden VM、SP1など、ロールアップやzkVMの領域で利用・実装が確認できる。
+証明サイズはGroth16より大きくなりやすいが、スケーラビリティ、透明性、ポスト量子志向が魅力である。
+
+Ligeroは、「trusted setupや公開鍵暗号を避けつつ、汎用回路の証明を比較的シンプルに構成したい」用途に向く。
+Ligeroそのものの大規模商用利用は限定的だが、GoogleのLongfellow/libZKは、Ligeroで使われるMPC-in-the-Headの考え方とsumcheckを組み合わせたZKライブラリとして公開され、年齢確認・デジタルID用途に接続している。
+そのため、Ligeroは「研究方式」だけでなく、現代のプライバシー保護型IDに影響を与えた方式系譜として重要である。
+
+Auroraは、「R1CS資産を透明セットアップ・ポスト量子志向の証明へつなぎたい」用途に向く。
+実サービスでAuroraそのものが広く使われている例は明確ではないが、R1CS向け透明zkSNARKとして、Groth16的なR1CS世界と、ハッシュ/IOPベースの透明ZKP世界をつなぐ学術的・設計上の価値が高い。
+
+Virgoは、「構造化された算術回路、特にMerkle treeや層状回路を透明セットアップで効率よく証明したい」用途に向く。
+実サービスでの直接利用例は限定的だが、透明な多項式委譲とlayered arithmetic circuit向けの設計は、データベース検証、Merkle tree検証、構造化計算の証明に向いている。
+
+大まかにいえば、選び方は次の通りである。
+
+- 証明を最小にして、安くオンチェーン検証したい: Groth16
+- rollupやzkVMのように大きな計算をまとめて証明したい: ZK-STARK
+- trusted setupを避け、IDやcredential系の回路を軽量に証明したい: Ligero系/Longfellow系
+- R1CS回路を透明・ポスト量子志向で扱いたい: Aurora
+- Merkle treeや層構造のある計算を透明に証明したい: Virgo
+
+2. Groth16
+----------
+
+2.1 方式の魅力
+
+Groth16の魅力は、ひと言でいえば「証明が非常に小さく、検証が非常に速い」ことである。
+非専門家向けには、Groth16を「分厚い監査書類を、数百バイト程度の暗号レシートに圧縮する仕組み」と説明できる。
+検証者は、元データや計算過程を見なくても、その小さなレシートを確認するだけで、条件が満たされたことを確認できる。
+
+Groth16は、ペアリングベースのzk-SNARKであり、R1CS/QAPとして表現された計算の充足性を短い証明で示す。
+Groth16の代表的特徴は、証明サイズが小さく、検証が高速なことである。
+この性質は、特にブロックチェーン上のスマートコントラクト検証と相性がよい。
+
+2.2 事実として確認できる利用例
+
+(1) Zcash Sapling
+
+Zcashのプロトコル仕様では、Sapling以降のトランザクションでGroth16 zk-SNARK proofsが使われると記載されている。
+Zcashでは、支払元、支払先、金額などのプライバシーを守りながら、取引が正当であることを検証するためにZKPが使われてきた。
+これはGroth16の代表的な実運用例である。
+
+用途:
+- 匿名決済
+- 秘匿トランザクション
+- 二重支払い防止とプライバシーの両立
+
+適性:
+- 取引ごとに短い証明が必要
+- ノードや検証者が大量の証明を効率よく検証する必要がある
+- 回路が比較的固定されており、trusted setupを運用可能
+
+(2) Tornado Cash
+
+Tornado Cashのドキュメントでは、同プロトコルがSNARK、特にGroth16を利用していると説明されている。
+Tornado Cashは暗号資産のミキサーとして法的・規制上の議論があるため、ここでは技術的事例としてのみ扱う。
+技術的には、預入と引出を結びつけずに、利用者が正当な預入を行ったことを証明するためにGroth16が使われた。
+
+用途:
+- 匿名引出
+- commitment/nullifierに基づく二重使用防止
+- オンチェーン検証
+
+適性:
+- 証明をEthereum上で安く検証したい
+- 回路が固定されている
+- ユーザーがブラウザ側でproofを生成する
+
+(3) Semaphore / World ID
+
+Semaphoreは、ユーザーがグループメンバーであることを示しながら、元のアイデンティティを明かさずにsignal、たとえば投票やendorsementを送るためのプロトコルである。
+Worldの説明では、SemaphoreがGroth16 proofを検証できるチェーン上で、メンバーシップ証明と匿名signalを可能にすると説明されている。
+Least AuthorityのWorldcoin Protocol Cryptography監査報告でも、Worldcoin Protocolがark-circomやgnarkを通じてGroth16ベースのzk-SNARK proof-systemを利用すると説明されている。
+
+用途:
+- 匿名投票
+- 匿名メンバーシップ証明
+- Sybil resistance
+- 人間であることの証明とプライバシーの両立
+
+適性:
+- 「メンバーである」ことだけを示したい
+- 同じ人が二重投票しないようnullifierを使いたい
+- オンチェーンで検証したい
+- 証明サイズと検証コストを小さくしたい
+
+(4) Sui zkLogin
+
+SuiのzkLoginドキュメントでは、zkLoginがGroth16 zkSNARKを用いてゼロ知識証明を構成しており、その理由として、proof sizeとverification efficiencyの面で最も効率的な汎用zkSNARKであることが挙げられている。
+zkLoginは、OAuthなどWeb2認証情報を使いながら、ブロックチェーンアドレスとユーザーのログイン情報を直接結びつけないための仕組みである。
+
+用途:
+- Web2ログインとWeb3アカウントの接続
+- OAuth資格情報の秘匿証明
+- ブロックチェーン利用のUX改善
+
+適性:
+- ユーザー体験を改善したい
+- 証明をオンチェーンまたは軽量検証したい
+- 証明サイズを小さくしたい
+- 回路とパラメータをサービス側が管理できる
+
+2.3 Groth16が得意とするユースケース
+
+事実に基づく用途:
+- 匿名決済
+- ミキサー/匿名引出
+- 匿名メンバーシップ証明
+- zkLogin
+- オンチェーン検証
+- 固定回路のZKPアプリケーション
+
+推論される適性:
+- 固定された業務ロジックの繰り返し証明
+- スマートコントラクト上での低コスト検証
+- モバイル端末やブラウザからの短いproof提示
+- 「秘密を明かさず、条件だけを証明する」ID/credential用途
+- 高頻度の小型証明を大量に検証するシステム
+
+向きにくい用途:
+- 証明対象のプログラムが頻繁に変わる用途
+- trusted setupをガバナンス上許容できない用途
+- 長期保存・ポスト量子性を重視する監査証跡
+- 巨大な汎用プログラムを頻繁に証明する用途
+
+3. ZK-STARK
+-----------
+
+3.1 方式の魅力
+
+ZK-STARKの魅力は、「大きな計算を、trusted setupなしで、長期的な安全性を意識しながら証明できる」点にある。
+非専門家向けには、ZK-STARKを「巨大な計算ログを、誰でも検査できる透明な暗号監査証跡に圧縮する仕組み」と説明できる。
+
+Groth16が「小さな暗号レシート」なら、STARKは「巨大な計算工場の検査済み証明書」に近い。
+証明サイズはGroth16より大きくなりやすいが、透明性、スケーラビリティ、ポスト量子志向という強みがある。
+
+3.2 事実として確認できる利用例
+
+(1) StarkEx
+
+StarkWareのStarkExは、Ethereum Mainnet上で利用されるL2 scalability engineである。
+公式説明では、StarkEx serviceが取引バッチの妥当性を示すSTARK proofを生成し、そのproofをオンチェーンに送信するとされている。
+Verifier smart contractがSTARK proofを受け取り、検証後に新しいbalance stateのcommitmentをオンチェーンに保存する。
+
+用途:
+- 取引バッチのvalidity proof
+- DEX/取引所/決済アプリのL2スケーリング
+- オフチェーン計算とオンチェーン検証
+
+適性:
+- 多数の取引をまとめて証明したい
+- trusted setupを避けたい
+- 計算量は大きいが、検証は軽くしたい
+
+(2) Starknet
+
+Starknetのドキュメントでは、StarknetがSTARK proofsを用いてscalable, trustless computationを可能にする暗号プリミティブ上に構築されていると説明されている。
+Starknetは、Cairoプログラムを証明対象とし、Ethereum上での検証可能なスケーリングを実現するL2である。
+
+用途:
+- general-purpose L2
+- Cairoスマートコントラクトの実行証明
+- validity rollup
+- 大規模状態遷移の証明
+
+適性:
+- 大きな状態遷移を証明したい
+- L2の安全性をL1検証に接続したい
+- 証明対象が長い実行トレースになる
+
+(3) RISC Zero
+
+RISC Zeroのドキュメントでは、RISC Zero ZK-STARK protocolが説明されており、RISC-Vアーキテクチャに基づく一般計算の証明基盤であるとされている。
+GitHubでも、RISC Zeroはzk-STARKsとRISC-V microarchitectureに基づくzero-knowledge verifiable general computing platformと説明されている。
+
+用途:
+- zkVM
+- Rust等で書いたプログラムの実行証明
+- verifiable computation
+- ブロックチェーン外部計算の証明
+
+適性:
+- 開発者が普通のプログラムを書きたい
+- VM実行トレースとして証明したい
+- STARKの透明性と汎用計算を組み合わせたい
+
+(4) Miden VM / Polygon Miden
+
+Miden VMは、Rustで書かれたzero-knowledge virtual machineであり、任意のプログラム実行に対してSTARK-based proof of executionを生成できると説明されている。
+Polygon Midenも、STARKsを用いたスケーリング・プライバシーの方向性を掲げている。
+
+用途:
+- STARK-based zkVM
+- 実行証明
+- rollup/validity proof
+- プライバシーを持つアプリケーション実行
+
+適性:
+- STARKベースでVM実行を証明したい
+- 証明対象をプログラムとして書きたい
+- long computationを扱いたい
+
+(5) SP1
+
+SP1のドキュメントでは、SP1がrecursive STARKsをサポートし、長い計算を小さなチャンクに分けて再帰的に証明できると説明されている。
+また、STARK-to-SNARK wrapping layerにより、大きなSTARK proofを小さなSNARK proofへ圧縮し、オンチェーン検証を効率化できるとされる。
+
+用途:
+- Rust/LLVM系プログラムのzkVM証明
+- STARK proving + SNARK wrapping
+- オンチェーン検証と汎用計算の橋渡し
+
+適性:
+- 証明生成はSTARKで行い、最終検証はSNARKで安くしたい
+- 一般プログラムを扱いたい
+- EVM環境で小さく検証したい
+
+3.3 ZK-STARKが得意とするユースケース
+
+事実に基づく用途:
+- rollup/validity proof
+- L2スケーリング
+- 取引バッチ証明
+- zkVM
+- VM実行証明
+- general-purpose verifiable computation
+
+推論される適性:
+- 大規模計算の監査証跡
+- 長期保存される証明
+- ポスト量子性を重視する公開検証
+- サーバ計算・AI推論・データ処理の正当性証明
+- 証明対象のロジックが複雑で、実行トレースとして扱う方が自然な用途
+
+向きにくい用途:
+- 証明サイズを極限まで小さくしたい用途
+- EVM上で証明を直接安く検証したい用途
+- 小さな固定回路に対して最小コストを求める用途
+
+4. Ligero
+---------
+
+4.1 方式の魅力
+
+Ligeroの魅力は、「trusted setupも公開鍵暗号も使わず、ハッシュ関数と符号理論で汎用回路の証明を作る」点にある。
+非専門家向けには、Ligeroを「巨大な計算表の全体を見せずに、ランダムに選んだ数列と一部の列だけを見せることで、嘘があれば高確率でばれるようにする仕組み」と説明できる。
+
+Ligeroは、MPC-in-the-Head、interactive PCP、Reed-Solomon符号を用いる。
+通信量は回路サイズに対して概ね平方根型であり、Groth16のような極小証明ではないが、trusted setupを不要にし、ハッシュ関数ベースにできる点が重要である。
+
+4.2 事実として確認できる利用例・派生例
+
+(1) Ligero本体
+
+Ligeroの論文は、NPに対するシンプルなzero-knowledge argumentであり、通信量が検証回路サイズの平方根に比例すること、任意の衝突困難ハッシュ関数に基づけること、ランダムオラクルモデルでは非対話型zk-SNARKとして利用でき、trusted setupや公開鍵暗号を必要としないことを説明している。
+
+用途:
+- 汎用回路のZK argument
+- trusted setup不要の証明
+- ハッシュベースZK
+- 中規模回路の証明
+
+(2) Google Longfellow / libZK
+
+GoogleのLongfellow ZKライブラリは、ISO mdoc、JWT、W3C Verifiable Credentialsなど、既存のID標準に関するZKプロトコル構築を可能にするライブラリとして公開されている。
+IETFドラフトのlibZK/Longfellow説明では、入力xと回路Cについて、C(x,w)=0を満たすwitness wが存在することを証明するsuccinct NIZK argumentを定義し、その技術がLigeroで説明されるMPC-in-the-Headアプローチと、sumcheckベースのverifiable computation protocolを組み合わせるものだと説明されている。
+
+これは「Ligeroそのものが製品に使われている」というより、「Ligero系のMPC-in-the-Head的設計が、GoogleのID/年齢確認向けZKPライブラリに取り込まれている」と理解するのが正確である。
+
+Googleは2025年にZKPライブラリをオープンソース化し、年齢確認・デジタルID用途に向けたプライバシー強化アプリケーションを開発者が構築できるようにしたと説明している。
+Google Walletのブログでは、Google WalletにZKP technologyを統合し、age back to identityをリンクできない形で高速な年齢確認を行うと説明されている。
+
+用途:
+- 年齢確認
+- デジタルID
+- 既存credential標準のプライバシー保護
+- mdoc/JWT/VCに対するZKP
+
+適性:
+- ユーザーが「18歳以上」などの属性だけを示したい
+- credential全体や生年月日を開示したくない
+- ブラウザ・モバイル・ウォレットのようなユーザー端末でproofを作りたい
+- trusted setupを避けたい
+
+4.3 Ligeroが得意とするユースケース
+
+事実に基づく用途:
+- 汎用回路のZK argument
+- ハッシュベース・trusted setup不要の証明
+- Ligero系のアイデアを使ったID/年齢確認ライブラリ
+
+推論される適性:
+- 年齢確認、資格確認、ID属性証明
+- 中規模回路のプライバシー保護
+- 端末側でのZKP生成
+- 公開鍵暗号やtrusted setupを避けたい組織間プロトコル
+- eIDAS/EUDI Walletなど、プライバシー保護型デジタルIDの一部
+
+向きにくい用途:
+- 証明サイズを極小にしたいオンチェーン検証
+- 大規模VM実行のような長大トレース
+- 既存のGroth16/PLONKエコシステムとの即時互換性が必要なプロジェクト
+
+5. Aurora
+---------
+
+5.1 方式の魅力
+
+Auroraの魅力は、「R1CSという既存ZKPでよく使われる制約表現を、trusted setupなし・ハッシュベース・ポスト量子志向の世界へつなぐ」点にある。
+非専門家向けには、Auroraを「Groth16のようなR1CS回路を、毒性のあるセットアップなしで検査できるようにした透明型の証明方式」と説明できる。
+
+Auroraは、R1CSに対する透明zkSNARKであり、Reed-Solomon符号、IOP、sumcheck、低次数検査を使って、R1CS制約が満たされていることを証明する。
+
+5.2 事実として確認できる利用例
+
+Auroraの原論文では、AuroraはR1CSに対するzkSNARKとして設計・実装・評価され、transparent setup、plausibly post-quantum security、lightweight cryptographyを特徴とする。
+証明サイズは O(log^2 n)、証明生成は O(n log n)、検証は O(n) と説明されている。
+
+また、libiopというC++ライブラリが公開されており、IOP-based zkSNARKsを構成するライブラリとして、transparent、post-quantum、lightweight symmetric cryptographyに基づくと説明されている。
+
+ただし、2026年時点で、Auroraそのものが大規模商用サービスの中核証明方式として広く使われている明確な事例は確認しにくい。
+実用プロダクトというより、R1CS向け透明zkSNARKの重要な研究・実装基盤として見るのが適切である。
+
+用途:
+- R1CSの透明証明
+- ハッシュ/IOPベースのzkSNARK研究
+- post-quantum-oriented proof systemの設計
+- LigeroやSTARKとの比較基準
+
+5.3 Auroraが得意とするユースケース
+
+事実に基づく用途:
+- R1CS向け透明zkSNARK
+- IOP-based zkSNARKライブラリ
+- 学術研究・ベンチマーク・実験実装
+
+推論される適性:
+- 既存のR1CS回路資産をtrusted setupなしに証明したい場合
+- Groth16から透明型ZKPへの移行を検討する研究・内部PoC
+- 長期安全性やポスト量子性を意識した監査証明
+- R1CS化されたcredential検証、署名検証、データ整合性検証
+- 公的研究・標準化評価で、Groth16とSTARKの中間的方式を比較したい場合
+
+向きにくい用途:
+- すぐに商用サービスへ載せる用途
+- 検証コストをGroth16並みに小さくしたい用途
+- zkVMや複雑な一般プログラム実行をそのまま扱いたい用途
+
+6. Virgo
+--------
+
+6.1 方式の魅力
+
+Virgoの魅力は、「構造化された回路を、透明セットアップで効率よく証明する」点にある。
+非専門家向けには、Virgoを「きれいな階層構造を持つ計算、たとえばMerkle treeや段階的なデータ処理を、短めの証明で検査する方式」と説明できる。
+
+Virgoは、transparent polynomial delegationとlayered arithmetic circuit向けのZK argumentを中心に構成される。
+特に、構造化回路に対して検証を軽くすることを狙う。
+
+6.2 事実として確認できる利用例
+
+Virgoの論文では、trusted setupなしのsuccinct zero knowledge argument systemとしてVirgoを実装し、性能評価を行ったとされている。
+具体例として、256葉のMerkle treeを計算する回路に対し、証明生成53秒、検証50ms、証明サイズ253KBという実験結果が報告されている。
+また、Virgoは軽量暗号プリミティブ、たとえば衝突困難ハッシュ関数を用いるため、plausibly post-quantum secureと説明されている。
+
+一方で、2026年時点でVirgoそのものが広く商用プロダクトの中核方式として使われている明確な事例は確認しにくい。
+研究・プロトタイプ・後続研究の基盤としての位置づけが強い。
+
+2025年にはVirgoを再検討する研究も出ており、VirgoのzkVPD設計や実装における限界や脆弱性を検討したとされる。
+このため、Virgoを実サービスへ採用する場合は、方式の改良版、実装監査、パラメータ、セキュリティ証明を慎重に確認する必要がある。
+
+用途:
+- layered arithmetic circuit
+- Merkle tree証明
+- 多項式委譲
+- 構造化データ処理の検証
+
+6.3 Virgoが得意とするユースケース
+
+事実に基づく用途:
+- Merkle tree計算回路の証明
+- layered arithmetic circuitのZKP
+- transparent polynomial delegation
+- 研究実装と性能評価
+
+推論される適性:
+- データベース検索・集計の検証
+- Merkle inclusion / batch updateの検証
+- 監査ログや状態木の更新証明
+- 大量データを階層的に処理する計算
+- 透明セットアップで構造化回路を証明したい研究・内部検証
+
+向きにくい用途:
+- 即座に商用プロダクトへ載せる用途
+- 複雑な一般プログラムをそのまま扱う用途
+- 実装成熟度と監査済みライブラリを最優先する用途
+- EVM上で極小証明を検証したい用途
+
+7. 用途別の方式選定
+-------------------
+
+7.1 オンチェーンで安く検証したい
+
+最有力:
+- Groth16
+
+理由:
+- 証明が非常に小さい
+- 検証が軽い
+- EVMやMoveなどでの検証器が作りやすい
+- 実利用例が多い
+
+実例:
+- Zcash Sapling
+- Tornado Cash
+- Semaphore/World ID
+- Sui zkLogin
+
+補足:
+- STARK系は証明が大きくなりやすいため、EVM上ではSTARK-to-SNARK wrappingが使われることもある。
+- SP1はSTARK-to-SNARK wrapping layerを説明している。
+
+7.2 大きな計算や取引バッチを証明したい
+
+最有力:
+- ZK-STARK
+
+理由:
+- 実行トレース/AIRと相性がよい
+- rollupやzkVMで実績がある
+- trusted setup不要
+- 大規模計算に向く
+
+実例:
+- StarkEx
+- Starknet
+- RISC Zero
+- Miden VM
+- SP1
+
+7.3 デジタルID・年齢確認をしたい
+
+有力:
+- Groth16
+- Ligero系/Longfellow系
+- 場合によってBBS+署名など用途特化方式
+
+理由:
+- Groth16は証明サイズと検証効率が高い
+- Ligero系/Longfellow系はtrusted setupを避け、既存ID標準と接続しやすい
+- ユーザーが「18歳以上」「資格あり」だけを示す用途に魅力がある
+
+実例:
+- Sui zkLogin: Groth16
+- Google Wallet / Longfellow ZK: Ligero系MPC-in-the-Head + sumcheckの影響を受けたZKPライブラリ
+
+7.4 R1CS資産を活かしつつ透明化したい
+
+有力:
+- Aurora
+
+理由:
+- R1CS向け透明zkSNARK
+- ハッシュ/IOP/軽量暗号ベース
+- Groth16的な回路表現と透明ZKPをつなぐ
+
+実例:
+- libiopライブラリ
+- 研究実装
+
+推論:
+- 既存R1CS回路の長期安全性評価や研究PoCに向く
+
+7.5 構造化データ・Merkle tree・階層計算を証明したい
+
+有力:
+- Virgo
+- ZK-STARK
+- 場合によりGroth16/PLONK
+
+理由:
+- Virgoはlayered arithmetic circuitやMerkle tree計算で評価されている
+- STARKは実行トレース・状態更新に強い
+- Groth16は最終検証を小さくしたい場合に有効
+
+実例:
+- Virgo論文のMerkle tree評価
+- Miden/RISC ZeroなどSTARK-based VMでの実行証明
+
+8. 比較表
+---------
+
+| 方式 | 実利用の確認度 | 得意な用途 | 魅力 | 注意点 |
+|---|---|---|---|---|
+| Groth16 | 高い | オンチェーン検証、匿名決済、zkLogin、匿名メンバーシップ | 証明が極小、検証が速い | trusted setup、非ポスト量子、回路変更に弱い |
+| ZK-STARK | 高い | rollup、zkVM、大規模計算、取引バッチ証明 | 透明、スケーラブル、ポスト量子志向 | 証明サイズが大きくなりやすい |
+| Ligero | 中。研究方式・派生実装あり | trusted setup不要の汎用回路証明、ID/年齢確認系 | ハッシュベース、公開鍵暗号不要、設計が直感的 | 証明サイズは平方根型、直接商用採用例は限定的 |
+| Aurora | 中低。研究・ライブラリ中心 | R1CSの透明証明、研究PoC、標準化評価 | R1CSと透明ZKPの橋渡し | 商用利用例は限定的、検証O(n) |
+| Virgo | 中低。研究・後続研究中心 | Merkle tree、layered circuit、構造化計算 | 透明、多項式委譲、構造化回路に強い | 実装成熟度、後続研究での指摘、一般用途は限定的 |
+
+9. 最終的な整理
+---------------
+
+Groth16は、実利用の多さと小さな証明サイズで今も強い。
+小さな証明をオンチェーンに出し、すばやく検証したいアプリケーションでは第一候補になりやすい。
+一方で、trusted setupやポスト量子性をどう扱うかが課題である。
+
+ZK-STARKは、rollupやzkVMのように「大きな計算をまとめて証明する」世界で実績がある。
+STARK系は、Groth16より証明が大きくても、transparent setup、スケーラビリティ、長期安全性を重視する用途では非常に魅力的である。
+
+Ligeroは、実サービスでそのまま使われる方式というより、trusted setup不要・ハッシュベース・MPC-in-the-Head的ZKPの設計思想として重要である。
+Google Longfellow/libZKのように、その思想はデジタルIDや年齢確認の実装に影響を与えている。
+
+Auroraは、R1CS向け透明zkSNARKとして、Groth16とSTARK/Ligero系の間をつなぐ方式である。
+研究・評価・PoCに向くが、広範な商用サービスでの直接採用は限定的である。
+
+Virgoは、Merkle treeやlayered arithmetic circuitのような構造化計算を透明に証明する方向で重要である。
+ただし、実用採用には実装成熟度と安全性評価の確認が必要である。
+
+参考文献・参照URL
+------------------
+
+[1] Zcash Protocol Specification, Sapling, Groth16 zk-SNARK proofs
+https://zips.z.cash/protocol/sapling.pdf
+
+[2] StarkWare, StarkEx
+https://starkware.co/starkex/
+
+[3] Starknet Documentation, Cryptography
+https://docs.starknet.io/learn/protocol/cryptography
+
+[4] Sui Documentation, zkLogin
+https://docs.sui.io/sui-stack/zklogin-integration/zklogin
+
+[5] Tornado Cash Documentation, Circuits
+https://docs.tornado.ws/circuits/
+
+[6] Semaphore
+https://semaphore.pse.dev/
+
+[7] World, Introduction to Zero-Knowledge Proofs, Semaphore and World ID
+https://world.org/blog/world/intro-zero-knowledge-proofs-semaphore-application-world-id
+
+[8] Least Authority, Worldcoin Protocol Cryptography Final Audit Report
+https://leastauthority.com/wp-content/uploads/2023/07/Worldcoin_Protocol_Cryptography_Final_Audit_Report.pdf
+
+[9] RISC Zero Developer Docs, Proof System Overview
+https://dev.risczero.com/proof-system/
+
+[10] RISC Zero GitHub
+https://github.com/risc0/risc0
+
+[11] Miden VM Documentation
+https://docs.miden.xyz/reference/miden-vm/
+
+[12] SP1 Documentation, What is a zkVM?
+https://docs.succinct.xyz/docs/sp1/what-is-a-zkvm
+
+[13] Ligero, Designs, Codes and Cryptography 2023
+https://link.springer.com/article/10.1007/s10623-023-01222-8
+
+[14] Google Blog, Opening up Zero-Knowledge Proof technology to promote privacy in age assurance
+https://blog.google/innovation-and-ai/technology/safety-security/opening-up-zero-knowledge-proof-technology-to-promote-privacy-in-age-assurance/
+
+[15] IETF Datatracker, The Longfellow Zero-knowledge Scheme / libZK
+https://datatracker.ietf.org/doc/draft-google-cfrg-libzk/
+
+[16] Google Longfellow ZK GitHub
+https://github.com/google/longfellow-zk
+
+[17] Google Wallet Blog, age and identity verification
+https://blog.google/products-and-platforms/platforms/google-pay/google-wallet-age-identity-verifications/
+
+[18] Aurora, IACR ePrint 2018/828
+https://eprint.iacr.org/2018/828
+
+[19] libiop GitHub
+https://github.com/scipr-lab/libiop
+
+[20] Virgo, IACR ePrint 2019/1482
+https://eprint.iacr.org/2019/1482
+
+[21] Revisiting Virgo, Cybersecurity 2025
+https://link.springer.com/article/10.1186/s42400-025-00450-w
