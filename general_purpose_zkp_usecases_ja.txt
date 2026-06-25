@@ -1,0 +1,438 @@
+汎用ZKPの用途に関するリサーチメモ
+作成日: 2026-06-25
+
+概要
+====
+
+汎用ZKP（general-purpose zero-knowledge proof / general-purpose SNARK・STARK等）は、特定の署名や範囲証明だけでなく、任意の計算・プログラム・制約充足を「短い証明」として検証可能にする技術である。典型的なstatementは次の形で表せる。
+
+    ∃ w such that R(x, w) = 1
+
+ここで x は公開入力、w は秘密入力または実行トレース、R は検証したい計算・制約である。実装上は、R を算術回路、R1CS、QAP、Plonkish制約、AIR、lookup table、VM実行トレースなどへ変換し、その充足性を証明する。
+
+汎用ZKPの主用途は、大きく次に整理できる。
+
+1. 検証可能計算・クラウド委託計算
+2. ブロックチェーンのスケーリング、zk-rollup、ZK coprocessor、zkVM
+3. 匿名決済・秘匿取引・プライバシー保護型台帳
+4. proof of reserves / proof of solvency / proof of liabilities
+5. 複雑な属性証明・KYC/AML/コンプライアンス証明
+6. Webデータ・oracle・TLS由来データの真正性証明
+7. zkML、すなわちAI/機械学習の推論・学習・評価の検証
+8. 監査・サプライチェーン・ソフトウェア実行証跡・ポリシー遵守証明
+
+方式選定の観点では、Groth16とハッシュベース方式群では用途適性が異なる。Groth16は証明サイズが極小で検証が非常に速いため、オンチェーン検証、安定した固定回路、多数の検証者に提示する証明に適している。一方で、回路固有trusted setupが問題になりやすく、ポスト量子性は期待しにくい。ZK-STARK、Ligero、Aurora、Virgoのようなハッシュ/PCP/IOP系は、trusted setupを避けやすく、ポスト量子性を期待し得るため、透明性、長期検証性、大規模計算、公開監査に向く。ただし、証明サイズや検証コスト、実装成熟度、開発エコシステムは方式ごとに大きく異なる。
+
+1. 汎用ZKPとは何か
+==================
+
+汎用ZKPは、個別の暗号プリミティブ専用の証明ではなく、ある計算やプログラムの実行が正しかったことを証明するためのZKPである。例えば、次のような主張を証明できる。
+
+- 「このプログラムをこの入力で実行すると、この出力になる」
+- 「このMerkle rootに含まれる全口座残高の合計が公開コミットメントと一致する」
+- 「この状態遷移は台帳ルールに従っている」
+- 「このAIモデル推論は指定されたモデルと入力に基づいて実行された」
+- 「このcredentialに含まれる秘匿属性は、ある条件を満たしている」
+
+一般的には次のstatementになる。
+
+    ∃ witness w:
+        Program(public_input x, secret_input w) = public_output y
+
+または、
+
+    ∃ execution trace T:
+        Init(T_0, x) = 1
+        Step(T_i, T_{i+1}) = 1 for all i
+        Output(T_n) = y
+
+汎用ZKPの実装では、自然言語や通常のソースコードをそのまま証明するのではなく、プログラムを数理的な表現に変換する必要がある。Groth16やAuroraではR1CS/QAP、STARKではAIR/実行トレース、zkVMではRISC-V等の命令実行、PLONK系ではPlonkish制約やlookupが中心になる。
+
+2. 主な用途
+============
+
+2.1 検証可能計算・クラウド委託計算
+----------------------------------
+
+最も基本的な用途は、外部に委託した計算結果の正しさを、計算を再実行せずに検証することである。Pinocchioは、クラウド等に委託された一般計算を暗号学的に検証するシステムとして提案され、public evaluation keyを用いて計算を記述し、結果の正しさを検証できることを示した。
+
+典型的なstatement:
+
+    ∃ w such that C(x, w) = y
+
+用途例:
+
+- クラウド事業者が計算を正しく実行したことの証明
+- 外部委託されたリスク計算・統計処理・照合処理の検証
+- データベース検索や集計の完全性証明
+- 高価な計算をサーバ側で実行し、クライアント側は短い証明だけ検証する構成
+
+この用途では、秘匿性よりも「計算を再実行しなくても正しさを検証できる」点が中心になることが多い。秘密入力がある場合は、ゼロ知識性により入力や中間値を秘匿できる。
+
+2.2 ブロックチェーン・zk-rollup・ZK coprocessor・zkVM
+-------------------------------------------------------
+
+ブロックチェーンでは、汎用ZKPは特に大きな応用領域である。zk-rollupでは多数のトランザクションをオフチェーンで処理し、その状態遷移が正しいことをZKPで証明してオンチェーンに提出する。検証者、通常はスマートコントラクト、は全取引を再実行せずに、validity proofを検証する。
+
+典型的なstatement:
+
+    ∃ T such that
+        Execute(S_old, txs, T) = S_new
+        All transactions obey protocol rules
+
+用途例:
+
+- zk-rollupの状態遷移証明
+- ZK coprocessorによる重いオンチェーン計算のオフロード
+- zkVMによるRust/C/C++/RISC-Vプログラム実行証明
+- クロスチェーン検証、light client、oracle計算の検証
+- 履歴状態や複雑なDeFiロジックをオンチェーンへ持ち込む証明
+
+RISC ZeroやSP1のようなzkVMは、一般的なソースコードをRISC-V等へコンパイルし、その実行が正しいことを証明する。これにより、開発者は専用回路を書く代わりに、通常のプログラミング言語に近い形でZKPアプリケーションを構築できる。
+
+2.3 匿名決済・秘匿取引・プライバシー保護型台帳
+------------------------------------------------
+
+汎用ZKPは、公開台帳上で取引の正当性を検証しながら、送金元、送金先、金額などを秘匿する用途に使われる。Zerocashは、zk-SNARKを用いて、支払元、支払先、送金額を秘匿しながら取引の正当性を検証する分散型匿名決済を構成した。
+
+典型的なstatement:
+
+    ∃ note, sk, r such that
+        Commit(note; r) = C
+        note is unspent
+        nullifier is correctly derived
+        transaction conserves value
+        output commitments are well formed
+
+用途例:
+
+- 匿名決済
+- 秘匿送金
+- confidential asset transfer
+- プライバシー保護型スマートコントラクト
+- 取引金額や受取人を隠したまま台帳ルールを満たす証明
+
+この用途では、Groth16のような極小証明方式が歴史的に強く使われてきた。オンチェーン検証では、証明サイズと検証コストが極めて重要だからである。
+
+2.4 Proof of Solvency / Proof of Reserves / Proof of Liabilities
+----------------------------------------------------------------
+
+金融・暗号資産領域では、ZKPを用いて、資産や負債の詳細を開示せずに、支払能力や準備金の十分性を証明する用途がある。Provisionsは、取引所がBitcoinアドレス、総保有額、総負債、顧客情報を開示せずに支払能力を証明する仕組みとして提案された。Notusは、動的なproof of liabilitiesを扱い、SNARKでMerkle tree内の利用者負債合計を証明する方向を示した。
+
+典型的なstatement:
+
+    ∃ asset_records, liability_records such that
+        Sum(assets) >= Sum(liabilities)
+        each liability is non-negative
+        records correspond to committed customer data
+        asset ownership proofs are valid
+
+用途例:
+
+- 暗号資産取引所の準備金証明
+- 銀行・金融機関の秘匿監査
+- 負債合計・エクスポージャー・リスク制限の証明
+- 顧客別明細を隠した会計・監査証明
+
+この用途では、レンジプルーフ、Merkle membership、集計回路、署名検証、コミットメントの整合性が組み合わさる。汎用ZKPが必要になるのは、単純な範囲証明ではなく、複数条件を一つのstatementとして結合する場合である。
+
+2.5 複雑な属性証明・KYC/AML/コンプライアンス証明
+-------------------------------------------------
+
+単純な選択的開示だけならBBS+署名などの用途特化型方式が適している。しかし、複雑な条件、例えば「KYC済みで、制裁リストに該当せず、居住国条件を満たし、取引額が閾値以下で、credentialが失効していない」といった複合条件を証明するには、汎用ZKPが必要になることがある。
+
+典型的なstatement:
+
+    ∃ credential, signature, attributes, revocation_witness such that
+        VerifyIssuerSignature(pk, credential, signature) = 1
+        Policy(attributes) = 1
+        NotRevoked(credential) = 1
+        Commitment(credential) = C
+
+用途例:
+
+- 年齢確認、居住地確認、資格確認
+- KYC済みであることの証明
+- 取引適格性・投資家適格性の証明
+- 制裁・AMLポリシーへの適合証明
+- プライバシーを保ったアクセス制御
+
+実装上は、署名検証、属性抽出、日付計算、失効確認、スキーマ固定、nonceによる再利用防止などが回路内に入る。ここでは「ZKP方式」よりも「statement設計」の難しさが大きい。
+
+2.6 Webデータ・oracle・TLS由来データの真正性証明
+--------------------------------------------------
+
+近年の応用として、TLSセッションから得られたWebデータの出所や内容を、必要な部分だけ選択的に証明する仕組みがある。TLSNotaryは、Webサイトから得たデータを暗号学的に検証可能な形で第三者へ共有するプロトコルであり、ZKPを使って選択的な共有を可能にする方向を示している。
+
+典型的なstatement:
+
+    ∃ TLS transcript, server signature/MAC material, parsed field such that
+        transcript is authentic from server domain D
+        parsed field satisfies predicate P
+        only selected fields are revealed
+
+用途例:
+
+- 銀行残高、収入、保険、学歴等のWebデータ証明
+- oracleが取得した外部データの真正性証明
+- Web2データをWeb3スマートコントラクトへ持ち込む
+- 個人データの選択的証明
+
+この領域は、ZKP単体というより、TLS、MPC、commitment、署名検証、zkVMなどを組み合わせるシステムになりやすい。
+
+2.7 zkML・AI/機械学習の検証
+----------------------------
+
+zkMLでは、モデル推論、学習、テストが正しく実行されたことを、入力データやモデル重みを秘匿しながら証明する。2025年のサーベイは、ZKML研究をverifiable training、verifiable inference、verifiable testingに分類している。
+
+典型的なstatement:
+
+    ∃ x, model_parameters θ such that
+        f_θ(x) = y
+        Commit(x) = C_x
+        Commit(θ) = C_θ
+
+用途例:
+
+- AI推論結果の検証
+- モデルを公開せずに「所定モデルで推論した」ことを証明
+- 入力データを隠したままAI判定結果の正当性を示す
+- オンチェーンAI、biometric authentication、private data market
+- 規制監査におけるモデル実行証跡
+
+zkMLでは、非線形関数、浮動小数点、行列演算、softmax、正規化、量子化などが課題になる。汎用ZKPであることは重要だが、実用性は回路化・lookup・専用アクセラレーションに依存する。
+
+2.8 監査・サプライチェーン・ソフトウェア実行証跡
+--------------------------------------------------
+
+汎用ZKPは、内部データや取引先情報を開示せずに、ポリシー遵守や計算手順の正当性を証明する用途にも使える。
+
+典型的なstatement:
+
+    ∃ records, signatures, commitments such that
+        all required records are signed by authorized issuers
+        Policy(records) = 1
+        Commit(records) = public_commitment
+
+用途例:
+
+- サプライチェーンの認証・原産地・品質条件の証明
+- ソフトウェアが特定の制御フローや検証手順を通過した証明
+- 内部統制・監査ルールへの準拠証明
+- 秘匿データセットに対する統計処理結果の証明
+
+この用途では、ZKPは「現実の真実」を直接保証するものではなく、署名済み・コミット済みのデータが定義されたpolicyを満たすことを証明する。データ発行者、署名基盤、監査手順、物理的検査は別途必要である。
+
+3. Groth16とハッシュベース方式の用途差
+======================================
+
+3.1 Groth16の用途適性
+----------------------
+
+Groth16は、ペアリングベースのpreprocessing zk-SNARKであり、証明が3つの群要素、検証が3つのペアリングを用いた単一のペアリング積方程式で済むとされる。したがって、証明サイズと検証コストが非常に小さい。
+
+向く用途:
+
+- オンチェーン検証
+- 匿名決済・秘匿取引
+- 固定された回路の繰り返し証明
+- verification costが強く制約される用途
+- 多数の第三者が同じ証明を検証する用途
+- 証明サイズを極小化したいモバイル・組込み・ブロックチェーン用途
+
+注意点:
+
+- 回路固有trusted setupが一般的
+- 回路変更時の再セットアップが運用負荷になる
+- ペアリング・楕円曲線仮定に依存するためポスト量子性は期待しにくい
+- 一般プログラムを扱うにはR1CS/QAPへの変換が必要
+- ハッシュや署名検証の回路化コストは依然として大きい
+
+Groth16は「安定したstatementを、非常に小さな証明で、安価に検証したい」場合に強い。回路が頻繁に変わる業務ロジックや、セットアップを受け入れにくい複数組織横断の利用では、他方式が適する場合がある。
+
+3.2 ZK-STARKの用途適性
+-----------------------
+
+ZK-STARKは、透明セットアップ、スケーラビリティ、ポスト量子性を重視する方式である。計算を実行トレース/AIRとして表すため、長い逐次計算やVM実行と相性がよい。
+
+向く用途:
+
+- zk-rollup、validity proof
+- zkVM・RISC-V実行証明
+- 大規模計算・長い実行トレース
+- transparent setupが求められる公開監査
+- 長期保存される証明
+- ポスト量子性を重視する用途
+- 組織横断でtrusted setupを避けたい用途
+
+注意点:
+
+- Groth16より証明サイズが大きくなりやすい
+- AIR/実行トレース設計が高度
+- オンチェーン検証では証明サイズ・検証コストの最適化が重要
+- ハッシュ関数、FRI、soundness errorのパラメータ設計が重要
+
+3.3 Ligeroの用途適性
+---------------------
+
+Ligeroは、NPに対するsimple ZK argumentで、通信量が検証回路サイズの平方根に比例し、任意の衝突困難ハッシュ関数に基づける。trusted setupや公開鍵暗号を不要にできる。
+
+向く用途:
+
+- trusted setupを避けたい中規模回路
+- 公開鍵暗号を使いたくないハッシュベース構成
+- Boolean/算術回路の証明
+- 研究・教育・透明ZKPの理解
+- proof sizeがGroth16ほど小さくなくてもよい用途
+
+注意点:
+
+- 通信量は概ね平方根型であり、Groth16やAurora系より大きくなり得る
+- 現代の商用ZKPエコシステムでの採用は限定的
+- 非対話化にはランダムオラクルモデルが必要
+- 一般プログラムには回路化frontendが必要
+
+3.4 Auroraの用途適性
+---------------------
+
+Auroraは、R1CS向けの透明セットアップ型zkSNARKであり、proof size O(log^2 n)、prover O(n log n)、verifier O(n) と説明される。R1CS資産を透明・ポスト量子志向の証明へ接続する方式と見られる。
+
+向く用途:
+
+- R1CSで表現済みの計算
+- trusted setupを避けたいR1CS系アプリケーション
+- R1CS互換性と透明性の両立
+- Groth16の代替を透明性重視で検討する場面
+- 研究・方式比較・標準的制約表現の透明ZKP化
+
+注意点:
+
+- 検証時間はO(n)であり、完全にpolylog verifierではない
+- 実装エコシステムはGroth16/PLONK/STARK/zkVMほど一般的ではない
+- Groth16ほど証明は小さくない
+- R1CS化の実装負担は残る
+
+3.5 Virgoの用途適性
+--------------------
+
+Virgoは、layered arithmetic circuits向けの透明ZK argumentであり、透明な多項式委譲を中核に持つ。構造化回路に強みがある。
+
+向く用途:
+
+- layered arithmetic circuitで自然に表せる計算
+- Merkle tree、反復的ハッシュ木、構造化データ処理
+- 多項式委譲・GKR系の利点を活かせる計算
+- trusted setupなしで構造化計算を証明したい場合
+
+注意点:
+
+- 任意の一般プログラムをそのまま扱う方式ではない
+- 回路の層構造に性能が依存する
+- 実装・運用実績は主要SNARK/STARK/zkVMより限定的
+
+4. 用途別の方式選定表
+======================
+
+| 用途 | Groth16 | ZK-STARK | Ligero | Aurora | Virgo |
+|---|---|---|---|---|---|
+| zk-rollup | 非常に有力。検証コストが低い | 非常に有力。透明・大規模計算に強い | 一般には限定的 | 研究上候補 | 構造化部分なら候補 |
+| 匿名決済 | 実績あり。証明小 | 候補だが証明大きめ | 限定的 | 候補 | 限定的 |
+| proof of solvency | 有力。集計回路に向く | 透明性重視なら有力 | 中規模なら候補 | R1CS資産があれば候補 | 構造化集計なら候補 |
+| zkVM/一般コード実行 | 直接は重い。R1CS VMが必要 | 有力。AIR/traceと相性が良い | 回路化が必要 | R1CS化が必要 | layered化が必要 |
+| 長期監査証跡 | setup/PQ面で注意 | 有力 | 有力だが証明サイズ注意 | 有力だが実装成熟度注意 | 構造化計算なら候補 |
+| AI/ML推論 | 小型モデルや固定回路なら候補 | 大規模・trace型なら候補 | 限定的 | R1CS化できれば候補 | 構造化演算なら候補 |
+| KYC/複雑属性証明 | 固定回路なら有力 | setup回避なら候補 | 中規模なら候補 | R1CS透明化なら候補 | 限定的 |
+| Webデータ/zkTLS処理 | 固定検証回路なら候補 | zkVM/外部データ処理で有力 | 限定的 | 候補 | 限定的 |
+| サプライチェーン/監査 | 固定policyなら有力 | 透明性・長期性で有力 | 中規模policyなら候補 | R1CS向け候補 | 構造化policyなら候補 |
+
+5. 実装上の重要論点
+====================
+
+5.1 汎用ZKPでも「プログラムをそのまま証明」はしない
+----------------------------------------------------
+
+汎用ZKPといっても、自然言語や通常のプログラムをそのまま証明するわけではない。必ず次のいずれかに変換する。
+
+- 算術回路
+- R1CS/QAP
+- Plonkish制約
+- AIR/実行トレース
+- lookup table
+- VM実行トレース
+
+zkVMはこの変換を開発者から隠す方向の技術であるが、それでも外部入力、時刻、ネットワーク、API、ファイル、署名、乱数などをどう公開入力・witnessにするかは設計者が定義する必要がある。
+
+5.2 用途特化ZKPと汎用ZKPの使い分け
+-----------------------------------
+
+すべてを汎用ZKPで解く必要はない。単純な範囲証明ならBulletproofs、選択的開示ならBBS+署名の方が自然な場合がある。汎用ZKPが必要になるのは、複数条件を組み合わせたpolicy、任意プログラム実行、集計・署名検証・Merkle membership・範囲証明を一つに結合する場合である。
+
+5.3 秘匿性と検証可能性のどちらが主目的か
+-----------------------------------------
+
+汎用ZKPの用途は二つに分かれる。
+
+1. Privacy-first: 秘密入力を隠したい
+2. Integrity-first: 計算の正しさを安価に検証したい
+
+匿名決済、KYC、zkMLはPrivacy-firstの色が強い。zk-rollup、クラウド計算、ZK coprocessorはIntegrity-firstの色が強い。実際には両者が混ざる。
+
+5.4 方式選定の基本方針
+----------------------
+
+- 最小証明・最小検証が最優先: Groth16
+- trusted setupを避けたい: ZK-STARK, Ligero, Aurora, Virgo
+- 一般コード実行を扱いたい: STARK系zkVM, RISC Zero, SP1など
+- R1CS資産を透明化したい: Aurora
+- 中規模回路で公開鍵暗号を避けたい: Ligero
+- 構造化回路を扱う: Virgo
+- 長期検証性・ポスト量子性重視: ハッシュ/PCP/IOP系
+- 回路が固定され、検証環境が厳しい: Groth16
+
+6. 参考文献・参照ソース
+======================
+
+[1] Pinocchio: Nearly Practical Verifiable Computation, ePrint 2013/279.
+https://eprint.iacr.org/2013/279
+
+[2] Jens Groth, On the Size of Pairing-based Non-interactive Arguments, ePrint 2016/260.
+https://eprint.iacr.org/2016/260
+
+[3] Zerocash: Decentralized Anonymous Payments from Bitcoin, ePrint 2014/349.
+https://eprint.iacr.org/2014/349
+
+[4] Ethereum.org, Zero-knowledge proofs / zk-rollups.
+https://ethereum.org/zero-knowledge-proofs/
+
+[5] ZK-STARK: Scalable, transparent, and post-quantum secure computational integrity, ePrint 2018/046.
+https://eprint.iacr.org/2018/046
+
+[6] Ligero: Lightweight Sublinear Arguments Without a Trusted Setup.
+https://link.springer.com/article/10.1007/s10623-023-01222-8
+
+[7] Aurora: Transparent Succinct Arguments for R1CS, ePrint 2018/828.
+https://eprint.iacr.org/2018/828
+
+[8] Virgo: Transparent Polynomial Delegation and Its Applications to Zero Knowledge Proof, ePrint 2019/1482.
+https://eprint.iacr.org/2019/1482
+
+[9] RISC Zero zkVM documentation.
+https://dev.risczero.com/api/zkvm/
+
+[10] SP1 zkVM documentation.
+https://docs.succinct.xyz/docs/sp1/introduction
+
+[11] A Survey of Zero-Knowledge Proof Based Verifiable Machine Learning, arXiv 2025.
+https://arxiv.org/abs/2502.18535
+
+[12] Provisions: Privacy-preserving Proofs of Solvency for Bitcoin Exchanges, ePrint 2015/1008.
+https://eprint.iacr.org/2015/1008
+
+[13] Notus: Dynamic Proofs of Liabilities from Zero-knowledge SNARKs / RSA accumulators, USENIX Security 2024.
+https://www.usenix.org/system/files/usenixsecurity24-xin.pdf
+
+[14] TLSNotary documentation.
+https://tlsnotary.org/docs/intro/
+
+[15] FRI: Fast Reed-Solomon Interactive Oracle Proofs of Proximity.
+https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ICALP.2018.14
